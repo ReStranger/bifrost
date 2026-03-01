@@ -24,9 +24,10 @@ import (
 // Only specify values you want to override from the semantic cache defaults.
 type Config struct {
 	// Embedding Model settings - REQUIRED for semantic caching
-	Provider       schemas.ModelProvider `json:"provider"`
-	Keys           []schemas.Key         `json:"keys"`
-	EmbeddingModel string                `json:"embedding_model,omitempty"` // Model to use for generating embeddings (optional)
+	Provider       schemas.ModelProvider  `json:"provider"`
+	Keys           []schemas.Key          `json:"keys"`
+	NetworkConfig  *schemas.NetworkConfig `json:"network_config,omitempty"`  // Network config inherited from provider (optional)
+	EmbeddingModel string                 `json:"embedding_model,omitempty"` // Model to use for generating embeddings (optional)
 
 	// Plugin behavior settings
 	CleanUpOnShutdown    bool          `json:"cleanup_on_shutdown,omitempty"`    // Clean up cache on shutdown (default: false)
@@ -48,9 +49,10 @@ type Config struct {
 func (c *Config) UnmarshalJSON(data []byte) error {
 	// Define a temporary struct to avoid infinite recursion
 	type TempConfig struct {
-		Provider                     string        `json:"provider"`
-		Keys                         []schemas.Key `json:"keys"`
-		EmbeddingModel               string        `json:"embedding_model,omitempty"`
+		Provider                     string                `json:"provider"`
+		Keys                         []schemas.Key         `json:"keys"`
+		NetworkConfig                *schemas.NetworkConfig `json:"network_config,omitempty"`
+		EmbeddingModel               string                `json:"embedding_model,omitempty"`
 		CleanUpOnShutdown            bool          `json:"cleanup_on_shutdown,omitempty"`
 		Dimension                    int           `json:"dimension"`
 		TTL                          interface{}   `json:"ttl,omitempty"`
@@ -70,6 +72,7 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	// Set simple fields
 	c.Provider = schemas.ModelProvider(temp.Provider)
 	c.Keys = temp.Keys
+	c.NetworkConfig = temp.NetworkConfig
 	c.EmbeddingModel = temp.EmbeddingModel
 	c.CleanUpOnShutdown = temp.CleanUpOnShutdown
 	c.Dimension = temp.Dimension
@@ -199,8 +202,9 @@ var VectorStoreProperties = map[string]vectorstore.VectorStoreProperties{
 }
 
 type PluginAccount struct {
-	provider schemas.ModelProvider
-	keys     []schemas.Key
+	provider      schemas.ModelProvider
+	keys          []schemas.Key
+	networkConfig *schemas.NetworkConfig
 }
 
 func (pa *PluginAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
@@ -212,8 +216,12 @@ func (pa *PluginAccount) GetKeysForProvider(ctx context.Context, providerKey sch
 }
 
 func (pa *PluginAccount) GetConfigForProvider(providerKey schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+	nc := schemas.DefaultNetworkConfig
+	if pa.networkConfig != nil {
+		nc = *pa.networkConfig
+	}
 	return &schemas.ProviderConfig{
-		NetworkConfig:            schemas.DefaultNetworkConfig,
+		NetworkConfig:            nc,
 		ConcurrencyAndBufferSize: schemas.DefaultConcurrencyAndBufferSize,
 	}, nil
 }
@@ -328,8 +336,9 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, store vect
 		bifrost, err := bifrost.Init(ctx, schemas.BifrostConfig{
 			Logger: logger,
 			Account: &PluginAccount{
-				provider: config.Provider,
-				keys:     config.Keys,
+				provider:      config.Provider,
+				keys:          config.Keys,
+				networkConfig: config.NetworkConfig,
 			},
 		})
 		if err != nil {
