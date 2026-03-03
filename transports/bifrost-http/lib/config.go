@@ -3498,6 +3498,9 @@ func (c *Config) AddProviderKeysToSemanticCacheConfig(config *schemas.PluginConf
 	}
 
 	configMap["keys"] = keys.Keys
+	if keys.NetworkConfig != nil {
+		configMap["network_config"] = keys.NetworkConfig
+	}
 
 	return nil
 }
@@ -3519,6 +3522,7 @@ func (c *Config) RemoveProviderKeysFromSemanticCacheConfig(config *configstoreTa
 	}
 
 	configMap["keys"] = []schemas.Key{}
+	delete(configMap, "network_config")
 
 	config.Config = configMap
 
