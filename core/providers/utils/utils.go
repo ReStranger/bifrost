@@ -771,11 +771,27 @@ func HandleProviderAPIError(resp *fasthttp.Response, errorResp any) *schemas.Bif
 	// Check for empty response
 	trimmed := strings.TrimSpace(string(decodedBody))
 	if len(trimmed) == 0 {
+		// Provide a more descriptive error message based on HTTP status code
+		var errorMessage string
+		switch statusCode {
+		case 401:
+			errorMessage = "authentication failed: unauthorized (401) - check your API key"
+		case 403:
+			errorMessage = "access forbidden (403) - your API key may not have permission for this operation"
+		case 404:
+			errorMessage = "resource not found (404)"
+		case 429:
+			errorMessage = "rate limit exceeded (429)"
+		case 500, 502, 503, 504:
+			errorMessage = fmt.Sprintf("provider server error (%d)", statusCode)
+		default:
+			errorMessage = fmt.Sprintf("%s (HTTP %d)", schemas.ErrProviderResponseEmpty, statusCode)
+		}
 		return &schemas.BifrostError{
 			IsBifrostError: false,
 			StatusCode:     &statusCode,
 			Error: &schemas.ErrorField{
-				Message: schemas.ErrProviderResponseEmpty,
+				Message: errorMessage,
 			},
 			ExtraFields: schemas.BifrostErrorExtraFields{
 				RawResponse: rawErrorResponse,
@@ -840,15 +856,16 @@ func EnrichError(
 	}
 
 	if ShouldSendBackRawRequest(ctx, sendBackRawRequest) && len(requestBody) > 0 {
-		// Store as json.RawMessage to preserve exact JSON bytes (including key ordering)
-		bifrostErr.ExtraFields.RawRequest = json.RawMessage(requestBody)
+		// Store as json.RawMessage to preserve exact JSON bytes (including key ordering).
+		// Compact to remove insignificant whitespace that would break SSE framing.
+		bifrostErr.ExtraFields.RawRequest = compactRawJSON(requestBody)
 	} else {
 		bifrostErr.ExtraFields.RawRequest = nil
 	}
 
 	if ShouldSendBackRawResponse(ctx, sendBackRawResponse) {
 		if len(responseBody) > 0 {
-			bifrostErr.ExtraFields.RawResponse = json.RawMessage(responseBody)
+			bifrostErr.ExtraFields.RawResponse = compactRawJSON(responseBody)
 		}
 	} else {
 		bifrostErr.ExtraFields.RawResponse = nil
@@ -882,11 +899,12 @@ func HandleProviderResponse[T any](responseBody []byte, response *T, requestBody
 		// Store as json.RawMessage to preserve the exact JSON bytes (including key ordering).
 		// Previously this used sonic.Unmarshal into interface{} which created map[string]interface{}
 		// and destroyed key ordering in tool schemas and other order-sensitive structures.
-		rawRequest = json.RawMessage(requestBody)
+		// Compact to remove insignificant whitespace that would break SSE framing.
+		rawRequest = compactRawJSON(requestBody)
 	}
 
 	if sendBackRawResponse {
-		rawResponse = json.RawMessage(responseBody)
+		rawResponse = compactRawJSON(responseBody)
 	}
 
 	// Unmarshal the structured response
@@ -919,11 +937,24 @@ func HandleProviderResponse[T any](responseBody []byte, response *T, requestBody
 	return nil, nil, nil
 }
 
+// compactRawJSON removes insignificant whitespace from JSON bytes, returning a
+// json.RawMessage safe for SSE streaming (no literal newlines). Falls back to
+// the original bytes if compaction fails (e.g., invalid JSON).
+func compactRawJSON(data []byte) json.RawMessage {
+	var buf bytes.Buffer
+	if err := schemas.Compact(&buf, data); err == nil {
+		return json.RawMessage(buf.Bytes())
+	}
+	return json.RawMessage(data)
+}
+
 // ParseAndSetRawRequest stores the raw request body in the extra fields.
 // Uses json.RawMessage to preserve the exact JSON bytes (including key ordering).
+// The body is compacted to remove insignificant whitespace, which prevents
+// literal newlines from breaking SSE data-line framing during streaming.
 func ParseAndSetRawRequest(extraFields *schemas.BifrostResponseExtraFields, jsonBody []byte) {
 	if len(jsonBody) > 0 {
-		extraFields.RawRequest = json.RawMessage(jsonBody)
+		extraFields.RawRequest = compactRawJSON(jsonBody)
 	}
 }
 
