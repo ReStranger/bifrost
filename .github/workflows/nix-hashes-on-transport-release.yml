@@ -1,0 +1,53 @@
+name: Update Nix hashes (transport release)
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: nix-hashes-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: startsWith(github.event.release.tag_name, 'transports/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Enable Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - name: Compute vendorHash
+        id: vendor
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: nix/packages/update-hash.sh
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          title: "nix: update vendorHash for transports/v${{ steps.vendor.outputs.version }}"
+          commit-message: "nix: update vendorHash for transports/v${{ steps.vendor.outputs.version }}"
+          body: |
+            Updates `transports/vendorHash` for `${{ github.event.release.tag_name }}`.
+
+            - version: `${{ steps.vendor.outputs.version }}`
+            - vendorHash: `${{ steps.vendor.outputs.vendorHash }}`
+          branch: automation/nix-hashes/transports-v${{ steps.vendor.outputs.version }}
+          delete-branch: true
+          labels: |
+            dependencies

@@ -49,7 +49,10 @@
           system,
         }:
         let
-          version = "1.4.9";
+          readTrimmedFile = path: builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile path);
+
+          version = readTrimmedFile ./transports/version;
+          vendorHash = readTrimmedFile ./nix/packages/vendorHash;
 
           bifrost-ui = pkgs.callPackage ./nix/packages/bifrost-ui.nix {
             src = self;
@@ -63,6 +66,7 @@
             inherit inputs;
             src = self;
             inherit version;
+            inherit vendorHash;
             inherit bifrost-ui;
           };
 
