@@ -37,7 +37,7 @@ buildGoModule {
 
   modRoot = "transports";
   subPackages = [ "bifrost-http" ];
-  vendorHash = "sha256-Ck1cwv/DYI9EXmp7U2ZSNXlU+Qok8BFn5bcN1Pv7Nmc=";
+  vendorHash = pkgs.lib.strings.removeSuffix "\n" (builtins.readFile ./vendorHash);
 
   doCheck = false;
 
