@@ -3483,10 +3483,6 @@ func ValidateCustomProvider(config configstore.ProviderConfig, provider schemas.
 		return nil
 	}
 
-	if bifrost.IsStandardProvider(provider) {
-		return fmt.Errorf("custom provider validation failed: cannot be created on standard providers: %s", provider)
-	}
-
 	cpc := config.CustomProviderConfig
 
 	// Validate base provider type
