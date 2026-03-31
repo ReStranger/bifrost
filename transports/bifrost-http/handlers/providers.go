@@ -196,11 +196,6 @@ func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if payload.CustomProviderConfig != nil {
-		// custom provider key should not be same as standard provider names
-		if bifrost.IsStandardProvider(payload.Provider) {
-			SendError(ctx, fasthttp.StatusBadRequest, "Custom provider cannot be same as a standard provider")
-			return
-		}
 		if payload.CustomProviderConfig.BaseProviderType == "" {
 			SendError(ctx, fasthttp.StatusBadRequest, "BaseProviderType is required when CustomProviderConfig is provided")
 			return
