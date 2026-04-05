@@ -4,9 +4,28 @@
 
 Official Helm charts for deploying [Bifrost](https://github.com/maximhq/bifrost) - a high-performance AI gateway with unified interface for multiple providers.
 
-**Latest Version:** 2.0.12
+**Latest Version:** 2.0.14
 
 ## Changelog
+
+### v2.0.14
+
+- Added `placement` and `order` fields to custom plugin schema and template rendering
+- Added plugin property completeness check to `validate-helm-schema.sh`
+- Added custom plugin placement/order rendering tests to `validate-helm-templates.sh`
+- Added `PluginConfig` struct validation to `validate-go-config-fields.sh`
+
+### v2.0.13
+
+- Added missing client config properties: `asyncJobResultTTL`, `requiredHeaders`, `loggingHeaders`, `allowedHeaders`, `mcpAgentDepth`, `mcpToolExecutionTimeout`, `mcpCodeModeBindingLevel`, `mcpToolSyncInterval`, `hideDeletedVirtualKeysInFilters`
+- Added MCP new fields: top-level `toolSyncInterval`, per-client `clientId`, `isCodeModeClient`, `toolSyncInterval`, `isPingAvailable`, `toolPricing`, and `codeModeBindingLevel` in tool manager config
+- Added governance `modelConfigs` and `providers` top-level properties
+- Added cluster `region` property
+- Added guardrail provider `timeout` field (was missing from schema and template rendering)
+- Fixed `isPingAvailable` rendering bug in `_helpers.tpl` (was using wrong key name)
+- Added `is_ping_available` and `tool_pricing` to `config.schema.json` MCP client config
+- Added new CI script `validate-go-config-fields.sh` for Go struct-to-schema drift detection
+- Expanded all 3 existing CI validation scripts with Gap 1-8 property coverage
 
 ### v2.0.12
 
@@ -362,6 +381,8 @@ bifrost:
         enabled: true
         path: "/plugins/my-plugin.so"
         version: 1
+        placement: "pre_builtin"  # or "post_builtin" (default)
+        order: 0                  # execution order within placement group
         config:
           key: value
 ```
