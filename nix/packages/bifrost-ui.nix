@@ -4,12 +4,23 @@
   version,
 }:
 let
+  lib = pkgs.lib;
+
   npmDepsHash = builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile ../ui-npm-deps-hash.txt);
+
+  filteredSrc = lib.fileset.toSource {
+    root = src;
+    fileset = lib.fileset.unions [
+      (src + /ui)
+    ];
+  };
 in
+
 pkgs.buildNpmPackage {
   pname = "bifrost-ui";
   inherit version;
-  inherit src;
+
+  src = filteredSrc;
   sourceRoot = "source/ui";
 
   inherit npmDepsHash;

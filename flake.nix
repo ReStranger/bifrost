@@ -54,9 +54,10 @@
         }:
         let
           version = lib.strings.fileContents (self + /core/version);
+          src = ./.;
 
           bifrost-ui = pkgs.callPackage ./nix/packages/bifrost-ui.nix {
-            src = self;
+            inherit src;
             inherit version;
           };
         in
@@ -65,7 +66,7 @@
 
           bifrost-http = pkgs.callPackage ./nix/packages/bifrost-http.nix {
             inherit inputs;
-            src = self;
+            inherit src;
             inherit version;
             inherit bifrost-ui;
           };
