@@ -102,6 +102,63 @@ disable
 {{- end -}}
 {{- end -}}
 
+{{- /*
+  Logs-store PostgreSQL helpers. When storage.logsStore.postgres.enabled is true,
+  the logs store points at a separate external PostgreSQL; otherwise every helper
+  falls back to the shared bifrost.postgresql.* helpers so behavior is unchanged.
+*/ -}}
+{{- define "bifrost.logsPostgresql.host" -}}
+{{- if dig "postgres" "enabled" false .Values.storage.logsStore -}}
+{{- .Values.storage.logsStore.postgres.host -}}
+{{- else -}}
+{{- include "bifrost.postgresql.host" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "bifrost.logsPostgresql.port" -}}
+{{- if dig "postgres" "enabled" false .Values.storage.logsStore -}}
+{{- .Values.storage.logsStore.postgres.port -}}
+{{- else -}}
+{{- include "bifrost.postgresql.port" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "bifrost.logsPostgresql.database" -}}
+{{- if dig "postgres" "enabled" false .Values.storage.logsStore -}}
+{{- .Values.storage.logsStore.postgres.database -}}
+{{- else -}}
+{{- include "bifrost.postgresql.database" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "bifrost.logsPostgresql.username" -}}
+{{- if dig "postgres" "enabled" false .Values.storage.logsStore -}}
+{{- .Values.storage.logsStore.postgres.user -}}
+{{- else -}}
+{{- include "bifrost.postgresql.username" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "bifrost.logsPostgresql.password" -}}
+{{- if dig "postgres" "enabled" false .Values.storage.logsStore -}}
+{{- if .Values.storage.logsStore.postgres.existingSecret -}}
+env.BIFROST_LOGS_POSTGRES_PASSWORD
+{{- else -}}
+{{- .Values.storage.logsStore.postgres.password -}}
+{{- end -}}
+{{- else -}}
+{{- include "bifrost.postgresql.password" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "bifrost.logsPostgresql.sslMode" -}}
+{{- if dig "postgres" "enabled" false .Values.storage.logsStore -}}
+{{- .Values.storage.logsStore.postgres.sslMode -}}
+{{- else -}}
+{{- include "bifrost.postgresql.sslMode" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "bifrost.weaviate.host" -}}
 {{- if .Values.vectorStore.weaviate.external.enabled }}
 {{- .Values.vectorStore.weaviate.external.host }}
@@ -387,14 +444,15 @@ false
 {{- if .Values.bifrost.framework.pricing.mcpLibraryUrl }}
 {{- $_ := set $pricing "mcp_library_url" .Values.bifrost.framework.pricing.mcpLibraryUrl }}
 {{- end }}
-{{- if .Values.bifrost.framework.pricing.mcpLibrarySyncInterval }}
+{{- /* nil-aware: 0 is a meaningful value here (disables the catalog sync) */ -}}
+{{- if not (kindIs "invalid" .Values.bifrost.framework.pricing.mcpLibrarySyncInterval) }}
 {{- $_ := set $pricing "mcp_library_sync_interval" .Values.bifrost.framework.pricing.mcpLibrarySyncInterval }}
 {{- end }}
 {{- /* nil-aware: 0 is a meaningful value here (disables the background refresh) */ -}}
 {{- if not (kindIs "invalid" .Values.bifrost.framework.pricing.liveModelsSyncInterval) }}
 {{- $_ := set $pricing "live_models_sync_interval" .Values.bifrost.framework.pricing.liveModelsSyncInterval }}
 {{- end }}
-{{- if or $pricing.pricing_url $pricing.model_parameters_url $pricing.pricing_sync_interval $pricing.mcp_library_url $pricing.mcp_library_sync_interval (hasKey $pricing "live_models_sync_interval") }}
+{{- if or $pricing.pricing_url $pricing.model_parameters_url $pricing.pricing_sync_interval $pricing.mcp_library_url (hasKey $pricing "mcp_library_sync_interval") (hasKey $pricing "live_models_sync_interval") }}
 {{- $_ := set $framework "pricing" $pricing }}
 {{- end }}
 {{- end }}
@@ -616,11 +674,27 @@ false
 {{- /* Cluster Config */ -}}
 {{- if and .Values.bifrost.cluster .Values.bifrost.cluster.enabled }}
 {{- $cluster := dict "enabled" true }}
-{{- if .Values.bifrost.cluster.peers }}
-{{- $_ := set $cluster "peers" .Values.bifrost.cluster.peers }}
-{{- end }}
+{{- $clusterType := default "mesh" .Values.bifrost.cluster.type }}
+{{- $_ := set $cluster "type" $clusterType }}
 {{- if .Values.bifrost.cluster.region }}
 {{- $_ := set $cluster "region" .Values.bifrost.cluster.region }}
+{{- end }}
+{{- if eq $clusterType "broker" }}
+{{- $broker := dict }}
+{{- $_ := set $broker "address" .Values.bifrost.cluster.broker.address }}
+{{- if .Values.bifrost.cluster.broker.listenPort }}
+{{- $_ := set $broker "listen_port" .Values.bifrost.cluster.broker.listenPort }}
+{{- end }}
+{{- if hasKey .Values.bifrost.cluster.broker "tls" }}
+{{- $_ := set $broker "tls" .Values.bifrost.cluster.broker.tls }}
+{{- end }}
+{{- if .Values.bifrost.cluster.broker.authToken }}
+{{- $_ := set $broker "auth_token" .Values.bifrost.cluster.broker.authToken }}
+{{- end }}
+{{- $_ := set $cluster "broker" $broker }}
+{{- else }}
+{{- if .Values.bifrost.cluster.peers }}
+{{- $_ := set $cluster "peers" .Values.bifrost.cluster.peers }}
 {{- end }}
 {{- if .Values.bifrost.cluster.gossip }}
 {{- $gossip := dict }}
@@ -694,6 +768,7 @@ false
 {{- $_ := set $discovery "mdns_service" .Values.bifrost.cluster.discovery.mdnsService }}
 {{- end }}
 {{- $_ := set $cluster "discovery" $discovery }}
+{{- end }}
 {{- end }}
 {{- $_ := set $config "cluster_config" $cluster }}
 {{- end }}
@@ -885,13 +960,23 @@ false
 {{- if .Values.storage.logsStore.enabled }}
 {{- $logsStoreType := .Values.storage.logsStore.type | default .Values.storage.mode }}
 {{- if eq $logsStoreType "postgres" }}
-{{- $pgConfig := dict "host" (include "bifrost.postgresql.host" .) "port" (include "bifrost.postgresql.port" .) "db_name" (include "bifrost.postgresql.database" .) "user" (include "bifrost.postgresql.username" .) "password" (include "bifrost.postgresql.password" .) "ssl_mode" (include "bifrost.postgresql.sslMode" .) }}
+{{- $pgConfig := dict "host" (include "bifrost.logsPostgresql.host" .) "port" (include "bifrost.logsPostgresql.port" .) "db_name" (include "bifrost.logsPostgresql.database" .) "user" (include "bifrost.logsPostgresql.username" .) "password" (include "bifrost.logsPostgresql.password" .) "ssl_mode" (include "bifrost.logsPostgresql.sslMode" .) }}
+{{- if dig "postgres" "enabled" false .Values.storage.logsStore }}
+{{- if .Values.storage.logsStore.postgres.passwordCommand }}
+{{- $_ := set $pgConfig "password_command" .Values.storage.logsStore.postgres.passwordCommand }}
+{{- $_ := unset $pgConfig "password" }}
+{{- end }}
+{{- if .Values.storage.logsStore.postgres.connMaxLifetime }}
+{{- $_ := set $pgConfig "conn_max_lifetime" .Values.storage.logsStore.postgres.connMaxLifetime }}
+{{- end }}
+{{- else }}
 {{- if and .Values.postgresql.external.enabled .Values.postgresql.external.passwordCommand }}
 {{- $_ := set $pgConfig "password_command" .Values.postgresql.external.passwordCommand }}
 {{- $_ := unset $pgConfig "password" }}
 {{- end }}
 {{- if and .Values.postgresql.external.enabled .Values.postgresql.external.connMaxLifetime }}
 {{- $_ := set $pgConfig "conn_max_lifetime" .Values.postgresql.external.connMaxLifetime }}
+{{- end }}
 {{- end }}
 {{- if .Values.storage.logsStore.maxIdleConns }}
 {{- $_ := set $pgConfig "max_idle_conns" (.Values.storage.logsStore.maxIdleConns | int) }}
@@ -1315,6 +1400,12 @@ false
 {{- if .Values.bifrost.plugins.logging.enabled }}
 {{- $plugin := dict "enabled" true "name" "logging" "config" .Values.bifrost.plugins.logging.config }}
 {{- if hasKey .Values.bifrost.plugins.logging "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.logging.version | int) }}{{- end }}
+{{- if .Values.bifrost.plugins.logging.semaphore_size }}
+{{- $_ := set $plugin "semaphore_size" (.Values.bifrost.plugins.logging.semaphore_size | int) }}
+{{- end }}
+{{- if .Values.bifrost.plugins.logging.inject_timeout }}
+{{- $_ := set $plugin "inject_timeout" .Values.bifrost.plugins.logging.inject_timeout }}
+{{- end }}
 {{- $plugins = append $plugins $plugin }}
 {{- end }}
 {{- if .Values.bifrost.plugins.governance.enabled }}
@@ -1356,9 +1447,6 @@ false
 {{- if ne (int ($inputConfig.dimension | default 1536)) 1 }}
 {{- if $inputConfig.provider }}
 {{- $_ := set $scConfig "provider" $inputConfig.provider }}
-{{- end }}
-{{- if $inputConfig.keys }}
-{{- $_ := set $scConfig "keys" $inputConfig.keys }}
 {{- end }}
 {{- if $inputConfig.embedding_model }}
 {{- $_ := set $scConfig "embedding_model" $inputConfig.embedding_model }}
@@ -1461,6 +1549,12 @@ false
 {{- end }}
 {{- $plugin := dict "enabled" true "name" "otel" "config" $otelConfig }}
 {{- if hasKey .Values.bifrost.plugins.otel "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.otel.version | int) }}{{- end }}
+{{- if .Values.bifrost.plugins.otel.semaphore_size }}
+{{- $_ := set $plugin "semaphore_size" (.Values.bifrost.plugins.otel.semaphore_size | int) }}
+{{- end }}
+{{- if .Values.bifrost.plugins.otel.inject_timeout }}
+{{- $_ := set $plugin "inject_timeout" .Values.bifrost.plugins.otel.inject_timeout }}
+{{- end }}
 {{- $plugins = append $plugins $plugin }}
 {{- end }}
 {{- if .Values.bifrost.plugins.datadog.enabled }}
@@ -1650,6 +1744,76 @@ false
 {{- if hasKey .Values.bifrost.plugins.pubsub "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.pubsub.version | int) }}{{- end }}
 {{- $plugins = append $plugins $plugin }}
 {{- end }}
+{{- if .Values.bifrost.plugins.splunk.enabled }}
+{{- $splunkConfig := dict }}
+{{- $inputConfig := .Values.bifrost.plugins.splunk.config | default dict }}
+{{- if $inputConfig.endpoint }}
+{{- $_ := set $splunkConfig "endpoint" $inputConfig.endpoint }}
+{{- end }}
+{{- if $inputConfig.token }}
+{{- $_ := set $splunkConfig "token" $inputConfig.token }}
+{{- end }}
+{{- if $inputConfig.events_index }}
+{{- $_ := set $splunkConfig "events_index" $inputConfig.events_index }}
+{{- end }}
+{{- if $inputConfig.metrics_index }}
+{{- $_ := set $splunkConfig "metrics_index" $inputConfig.metrics_index }}
+{{- end }}
+{{- if $inputConfig.source }}
+{{- $_ := set $splunkConfig "source" $inputConfig.source }}
+{{- end }}
+{{- if $inputConfig.sourcetype }}
+{{- $_ := set $splunkConfig "sourcetype" $inputConfig.sourcetype }}
+{{- end }}
+{{- if $inputConfig.host }}
+{{- $_ := set $splunkConfig "host" $inputConfig.host }}
+{{- end }}
+{{- if hasKey $inputConfig "enable_events" }}
+{{- $_ := set $splunkConfig "enable_events" $inputConfig.enable_events }}
+{{- end }}
+{{- if hasKey $inputConfig "enable_metrics" }}
+{{- $_ := set $splunkConfig "enable_metrics" $inputConfig.enable_metrics }}
+{{- end }}
+{{- if hasKey $inputConfig "disable_content_logging" }}
+{{- $_ := set $splunkConfig "disable_content_logging" $inputConfig.disable_content_logging }}
+{{- end }}
+{{- if $inputConfig.ca_cert }}
+{{- $_ := set $splunkConfig "ca_cert" $inputConfig.ca_cert }}
+{{- end }}
+{{- if hasKey $inputConfig "insecure_skip_verify" }}
+{{- $_ := set $splunkConfig "insecure_skip_verify" $inputConfig.insecure_skip_verify }}
+{{- end }}
+{{- if $inputConfig.custom_fields }}
+{{- $_ := set $splunkConfig "custom_fields" $inputConfig.custom_fields }}
+{{- end }}
+{{- if hasKey $inputConfig "request_headers" }}
+{{- $_ := set $splunkConfig "request_headers" $inputConfig.request_headers }}
+{{- end }}
+{{- if $inputConfig.batch_max_bytes }}
+{{- $_ := set $splunkConfig "batch_max_bytes" (int $inputConfig.batch_max_bytes) }}
+{{- end }}
+{{- if $inputConfig.flush_interval_ms }}
+{{- $_ := set $splunkConfig "flush_interval_ms" (int $inputConfig.flush_interval_ms) }}
+{{- end }}
+{{- if $inputConfig.post_workers }}
+{{- $_ := set $splunkConfig "post_workers" (int $inputConfig.post_workers) }}
+{{- end }}
+{{- if hasKey $inputConfig "indexer_ack" }}
+{{- $_ := set $splunkConfig "indexer_ack" $inputConfig.indexer_ack }}
+{{- end }}
+{{- if $inputConfig.ack_poll_interval_ms }}
+{{- $_ := set $splunkConfig "ack_poll_interval_ms" (int $inputConfig.ack_poll_interval_ms) }}
+{{- end }}
+{{- if $inputConfig.ack_timeout_ms }}
+{{- $_ := set $splunkConfig "ack_timeout_ms" (int $inputConfig.ack_timeout_ms) }}
+{{- end }}
+{{- if $inputConfig.max_ack_attempts }}
+{{- $_ := set $splunkConfig "max_ack_attempts" (int $inputConfig.max_ack_attempts) }}
+{{- end }}
+{{- $plugin := dict "enabled" true "name" "splunk" "config" $splunkConfig }}
+{{- if hasKey .Values.bifrost.plugins.splunk "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.splunk.version | int) }}{{- end }}
+{{- $plugins = append $plugins $plugin }}
+{{- end }}
 {{- /* Custom plugins */ -}}
 {{- if .Values.bifrost.plugins.custom }}
 {{- range .Values.bifrost.plugins.custom }}
@@ -1659,6 +1823,8 @@ false
 {{- if .config }}{{- $_ := set $customPlugin "config" .config }}{{- end }}
 {{- if .placement }}{{- $_ := set $customPlugin "placement" .placement }}{{- end }}
 {{- if .order }}{{- $_ := set $customPlugin "order" (.order | int) }}{{- end }}
+{{- if .semaphore_size }}{{- $_ := set $customPlugin "semaphore_size" (.semaphore_size | int) }}{{- end }}
+{{- if .inject_timeout }}{{- $_ := set $customPlugin "inject_timeout" .inject_timeout }}{{- end }}
 {{- $plugins = append $plugins $customPlugin }}
 {{- end }}
 {{- end }}
@@ -1906,16 +2072,38 @@ Call this template at the beginning of deployment/stateful templates
 {{- fail "ERROR: bifrost.plugins.pubsub.config.topic_id is required when the Pub/Sub plugin is enabled." }}
 {{- end }}
 {{- end }}
+{{- if and (.Values.bifrost.plugins.splunk).enabled (hasKey .Values.bifrost.plugins.splunk "version") (lt (int .Values.bifrost.plugins.splunk.version) 1) }}
+{{- fail "ERROR: bifrost.plugins.splunk.version must be >= 1. Bump to >1 to force DB-backed plugin config updates." }}
+{{- end }}
+{{- if and (.Values.bifrost.plugins.splunk).enabled (hasKey .Values.bifrost.plugins.splunk "version") (gt (int .Values.bifrost.plugins.splunk.version) 32767) }}
+{{- fail "ERROR: bifrost.plugins.splunk.version must be <= 32767." }}
+{{- end }}
+{{- if (.Values.bifrost.plugins.splunk).enabled }}
+{{- $splunkInputConfig := .Values.bifrost.plugins.splunk.config | default dict }}
+{{- if not $splunkInputConfig.endpoint }}
+{{- fail "ERROR: bifrost.plugins.splunk.config.endpoint is required when the Splunk plugin is enabled." }}
+{{- end }}
+{{- if not $splunkInputConfig.token }}
+{{- fail "ERROR: bifrost.plugins.splunk.config.token is required when the Splunk plugin is enabled." }}
+{{- end }}
+{{- $splunkEventsEnabled := true }}
+{{- if hasKey $splunkInputConfig "enable_events" }}{{- $splunkEventsEnabled = $splunkInputConfig.enable_events }}{{- end }}
+{{- if and $splunkEventsEnabled (not $splunkInputConfig.events_index) }}
+{{- fail "ERROR: bifrost.plugins.splunk.config.events_index is required when the Splunk plugin has events enabled." }}
+{{- end }}
+{{- $splunkMetricsEnabled := true }}
+{{- if hasKey $splunkInputConfig "enable_metrics" }}{{- $splunkMetricsEnabled = $splunkInputConfig.enable_metrics }}{{- end }}
+{{- if and $splunkMetricsEnabled (not $splunkInputConfig.metrics_index) }}
+{{- fail "ERROR: bifrost.plugins.splunk.config.metrics_index is required when the Splunk plugin has metrics enabled." }}
+{{- end }}
+{{- end }}
 
 {{/* Validate semantic cache plugin when enabled */}}
 {{- if .Values.bifrost.plugins.semanticCache.enabled }}
 {{/* When dimension is 1, direct (hash-based) caching is used — provider and keys are not required. */}}
 {{- if ne (int .Values.bifrost.plugins.semanticCache.config.dimension) 1 }}
 {{- if not .Values.bifrost.plugins.semanticCache.config.provider }}
-{{- fail "ERROR: bifrost.plugins.semanticCache.config.provider is required for semantic caching. Supported providers: openai, anthropic, gemini, bedrock, azure, cohere, mistral, groq, ollama, openrouter, vertex, cerebras, parasail, perplexity, sgl, huggingface. For direct (hash-based) caching, set dimension: 1." }}
-{{- end }}
-{{- if not .Values.bifrost.plugins.semanticCache.config.keys }}
-{{- fail "ERROR: bifrost.plugins.semanticCache.config.keys is required for semantic caching. Provide at least one API key for the embedding provider. For direct (hash-based) caching, set dimension: 1." }}
+{{- fail "ERROR: bifrost.plugins.semanticCache.config.provider is required for semantic caching. Supported providers: openai, anthropic, gemini, bedrock, azure, cohere, mistral, groq, ollama, openrouter, vertex, cerebras, parasail, perplexity, sgl, huggingface. The provider's API keys are inherited from bifrost.providers, so configure that provider there. For direct (hash-based) caching, set dimension: 1." }}
 {{- end }}
 {{- end }}
 {{- end }}

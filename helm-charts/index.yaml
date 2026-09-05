@@ -3,10 +3,58 @@ entries:
   bifrost:
   - apiVersion: v2
     appVersion: 1.5.12
-    created: "2026-08-20T17:41:23.426673387Z"
+    created: "2026-09-05T13:15:37.752527228Z"
     description: A Helm chart for deploying Bifrost - AI Gateway with unified interface
       for multiple providers
-    digest: a902d21b9c8afe1107431ebcb4e1aabac7af545f7eb5b37379ee82b9fd897ed9
+    digest: 255ba5c3a2ffaf2451735b093b4791481d904a9517fd6ab1ba70774afeb209ed
+    home: https://www.getmaxim.ai/bifrost
+    icon: https://www.getbifrost.ai/favicon.png
+    keywords:
+    - ai
+    - gateway
+    - llm
+    - openai
+    - anthropic
+    maintainers:
+    - email: support@getbifrost.ai
+      name: Bifrost Team
+    name: bifrost
+    sources:
+    - https://github.com/maximhq/bifrost
+    type: application
+    urls:
+    - https://github.com/maximhq/bifrost/releases/download/helm-chart-v2.1.38/bifrost-2.1.38.tgz
+    version: 2.1.38
+  - apiVersion: v2
+    appVersion: 1.5.12
+    created: "2026-08-26T21:02:34.586211013Z"
+    description: A Helm chart for deploying Bifrost - AI Gateway with unified interface
+      for multiple providers
+    digest: 4ca78fd0fda8e6500fb623f835552ad41a0d6ddd4a98a279d01422278089c608
+    home: https://www.getmaxim.ai/bifrost
+    icon: https://www.getbifrost.ai/favicon.png
+    keywords:
+    - ai
+    - gateway
+    - llm
+    - openai
+    - anthropic
+    maintainers:
+    - email: support@getbifrost.ai
+      name: Bifrost Team
+    name: bifrost
+    sources:
+    - https://github.com/maximhq/bifrost
+    type: application
+    urls:
+    - https://github.com/maximhq/bifrost/releases/download/helm-chart-v2.1.37/bifrost-2.1.37.tgz
+    version: 2.1.37
+  - apiVersion: v2
+    appVersion: 1.5.12
+    created: "2026-08-23T05:25:46.596816744Z"
+    description: A Helm chart for deploying Bifrost - AI Gateway with unified interface
+      for multiple providers
+    digest: eb4c2bc8c9a40a98b8f3b06fd5906e8dc0b61176415a7ac74da2783dfaa4e842
     home: https://www.getmaxim.ai/bifrost
     icon: https://www.getbifrost.ai/favicon.png
     keywords:
@@ -1561,4 +1609,4 @@ entries:
     urls:
     - https://github.com/maximhq/bifrost/releases/download/helm-chart-v1.3.5/bifrost-1.3.5.tgz
     version: 1.3.5
-generated: "2026-08-20T17:41:23.42099895Z"
+generated: "2026-09-05T13:15:37.745967228Z"
