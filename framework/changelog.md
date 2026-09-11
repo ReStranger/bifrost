@@ -1,0 +1,1 @@
+- feat: backfill preferred model capability metadata from catalog entries

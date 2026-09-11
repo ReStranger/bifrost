@@ -1,0 +1,1 @@
+- feat: enrich /v1/models with capability metadata and regression tests
