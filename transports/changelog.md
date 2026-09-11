@@ -1,0 +1,1 @@
+- fix: include routing-rule entrypoint models in `/v1/models`

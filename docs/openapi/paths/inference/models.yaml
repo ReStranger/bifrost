@@ -5,6 +5,10 @@ models:
     description: |
       Lists available models. If provider is not specified, lists all models from all configured providers.
 
+      The response includes both provider-native list-model rows and any additional catalog-backed requestable names for the same provider scope (for example static key aliases or other catalog-only callable model names that are missing from the provider's live list-model response).
+
+      Dynamic routing-rule aliases are not included in this listing.
+
       If a virtual key is provided, Bifrost only lists (and only queries) providers allowed by that virtual key.
     tags:
     - Models
