@@ -75,3 +75,25 @@ func TestApplyListModelsProviderFilterWithoutModelsManager(t *testing.T) {
 		t.Fatalf("expected nothing to be published, got %#v", got)
 	}
 }
+
+func TestShouldSkipSyntheticListModelsAugmentation(t *testing.T) {
+	tests := []struct {
+		name       string
+		provider   string
+		extra      map[string]interface{}
+		wantToSkip bool
+	}{
+		{name: "global request without extras keeps augmentation", provider: "", extra: nil, wantToSkip: false},
+		{name: "global request with extras skips augmentation", provider: "", extra: map[string]interface{}{"region": "us"}, wantToSkip: true},
+		{name: "provider request without extras skips augmentation", provider: "openai", extra: nil, wantToSkip: true},
+		{name: "provider request with extras skips augmentation", provider: "openai", extra: map[string]interface{}{"region": "us"}, wantToSkip: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipSyntheticListModelsAugmentation(tc.provider, tc.extra); got != tc.wantToSkip {
+				t.Fatalf("shouldSkipSyntheticListModelsAugmentation(%q, %#v) = %v, want %v", tc.provider, tc.extra, got, tc.wantToSkip)
+			}
+		})
+	}
+}

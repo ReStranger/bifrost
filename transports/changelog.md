@@ -1,1 +1,2 @@
+- fix: include routing-rule entrypoint models in `/v1/models`
 - feat: enrich /v1/models with capability metadata and regression tests

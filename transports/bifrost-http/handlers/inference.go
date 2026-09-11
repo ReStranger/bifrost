@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -20,9 +21,14 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/fasthttp/router"
+	"github.com/google/cel-go/common"
+	celast "github.com/google/cel-go/common/ast"
+	"github.com/google/cel-go/common/operators"
+	"github.com/google/cel-go/parser"
 	bifrost "github.com/maximhq/bifrost/core"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
@@ -879,9 +885,6 @@ func (h *CompletionHandler) listModels(ctx *fasthttp.RequestCtx) {
 		h.applyListModelsProviderFilter(bifrostCtx)
 	}
 
-	var resp *schemas.BifrostListModelsResponse
-	var bifrostErr *schemas.BifrostError
-
 	pageSize := 0
 	if pageSizeStr := ctx.QueryArgs().Peek("page_size"); len(pageSizeStr) > 0 {
 		if n, err := strconv.Atoi(string(pageSizeStr)); err == nil && n >= 0 {
@@ -896,7 +899,7 @@ func (h *CompletionHandler) listModels(ctx *fasthttp.RequestCtx) {
 		PageToken: pageToken,
 	}
 
-	// Pass-through unknown query params for provider-specific features
+	// Pass-through unknown query params for provider-specific features.
 	extraParams := map[string]interface{}{}
 	for k, v := range ctx.QueryArgs().All() {
 		s := string(k)
@@ -908,16 +911,36 @@ func (h *CompletionHandler) listModels(ctx *fasthttp.RequestCtx) {
 		bifrostListModelsReq.ExtraParams = extraParams
 	}
 
-	// If provider is empty, list all models from all providers
-	if provider == "" {
-		resp, bifrostErr = h.client.ListAllModels(bifrostCtx, bifrostListModelsReq)
-	} else {
-		resp, bifrostErr = h.client.ListModelsRequest(bifrostCtx, bifrostListModelsReq)
+	if shouldSkipSyntheticListModelsAugmentation(provider, bifrostListModelsReq.ExtraParams) {
+		var resp *schemas.BifrostListModelsResponse
+		var bifrostErr *schemas.BifrostError
+		if provider == "" {
+			resp, bifrostErr = h.client.ListAllModels(bifrostCtx, bifrostListModelsReq)
+		} else {
+			resp, bifrostErr = h.client.ListModelsRequest(bifrostCtx, bifrostListModelsReq)
+		}
+		if bifrostErr != nil {
+			forwardProviderHeadersFromContext(ctx, bifrostCtx)
+			SendBifrostError(ctx, bifrostErr)
+			return
+		}
+		if streamLargeResponseIfActive(ctx, bifrostCtx) {
+			return
+		}
+		enrichListModelsResponse(resp, h.config.ModelCatalog)
+		if resp != nil {
+			lib.ApplyBifrostResponseHeaders(ctx, bifrostCtx, resp.ExtraFields)
+		}
+		SendJSON(ctx, resp)
+		return
 	}
 
-	if bifrostErr != nil {
+	liveResp, liveErr := h.fetchFullListModelsResponse(bifrostCtx, bifrostListModelsReq)
+	resp := cloneListModelsResponse(liveResp, liveErr)
+	resp = h.mergeRoutingListModelsResponse(bifrostCtx, bifrostListModelsReq.Provider, resp)
+	if len(resp.Data) == 0 && liveErr != nil {
 		forwardProviderHeadersFromContext(ctx, bifrostCtx)
-		SendBifrostError(ctx, bifrostErr)
+		SendBifrostError(ctx, liveErr)
 		return
 	}
 
@@ -926,11 +949,452 @@ func (h *CompletionHandler) listModels(ctx *fasthttp.RequestCtx) {
 	}
 
 	enrichListModelsResponse(resp, h.config.ModelCatalog)
+	sort.Slice(resp.Data, func(i, j int) bool {
+		return resp.Data[i].ID < resp.Data[j].ID
+	})
+	resp = resp.ApplyPagination(pageSize, pageToken)
 	if resp != nil {
 		lib.ApplyBifrostResponseHeaders(ctx, bifrostCtx, resp.ExtraFields)
 	}
-	// Send successful response
 	SendJSON(ctx, resp)
+}
+
+func shouldSkipSyntheticListModelsAugmentation(provider string, extraParams map[string]interface{}) bool {
+	return provider != "" || len(extraParams) > 0
+}
+
+func (h *CompletionHandler) fetchFullListModelsResponse(bifrostCtx *schemas.BifrostContext, req *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
+	if req == nil {
+		return nil, nil
+	}
+	if req.Provider == "" {
+		fullReq := *req
+		fullReq.PageSize = 0
+		fullReq.PageToken = ""
+		return h.client.ListAllModels(bifrostCtx, &fullReq)
+	}
+
+	fullReq := *req
+	fullReq.PageSize = schemas.DefaultPageSize
+	fullReq.PageToken = ""
+
+	var merged *schemas.BifrostListModelsResponse
+	for i := 0; i < schemas.MaxPaginationRequests; i++ {
+		pageResp, pageErr := h.client.ListModelsRequest(bifrostCtx, &fullReq)
+		if pageErr != nil {
+			if merged != nil {
+				mergeListModelsErrorContext(merged, pageErr)
+				return merged, pageErr
+			}
+			return nil, pageErr
+		}
+		if pageResp == nil {
+			break
+		}
+		if merged == nil {
+			merged = &schemas.BifrostListModelsResponse{
+				Data:        append([]schemas.Model(nil), pageResp.Data...),
+				ExtraFields: pageResp.ExtraFields,
+				KeyStatuses: append([]schemas.KeyStatus(nil), pageResp.KeyStatuses...),
+			}
+		} else {
+			merged.Data = append(merged.Data, pageResp.Data...)
+			merged.KeyStatuses = appendListModelsKeyStatuses(merged.KeyStatuses, pageResp.KeyStatuses)
+			if merged.ExtraFields.RequestType == "" {
+				merged.ExtraFields.RequestType = pageResp.ExtraFields.RequestType
+			}
+			if merged.ExtraFields.Provider == "" {
+				merged.ExtraFields.Provider = pageResp.ExtraFields.Provider
+			}
+			if merged.ExtraFields.OriginalModelRequested == "" {
+				merged.ExtraFields.OriginalModelRequested = pageResp.ExtraFields.OriginalModelRequested
+			}
+			if merged.ExtraFields.ResolvedModelUsed == "" {
+				merged.ExtraFields.ResolvedModelUsed = pageResp.ExtraFields.ResolvedModelUsed
+			}
+			if merged.ExtraFields.Latency == 0 {
+				merged.ExtraFields.Latency = pageResp.ExtraFields.Latency
+			}
+			if len(merged.ExtraFields.ProviderResponseHeaders) == 0 {
+				merged.ExtraFields.ProviderResponseHeaders = pageResp.ExtraFields.ProviderResponseHeaders
+			}
+			if merged.ExtraFields.RoutingInfo.Provider == "" && pageResp.ExtraFields.RoutingInfo.Provider != "" {
+				merged.ExtraFields.RoutingInfo = pageResp.ExtraFields.RoutingInfo
+			}
+		}
+		if pageResp.NextPageToken == "" {
+			break
+		}
+		fullReq.PageToken = pageResp.NextPageToken
+	}
+	if merged == nil {
+		return &schemas.BifrostListModelsResponse{}, nil
+	}
+	return merged, nil
+}
+
+func cloneListModelsResponse(liveResp *schemas.BifrostListModelsResponse, liveErr *schemas.BifrostError) *schemas.BifrostListModelsResponse {
+	resp := &schemas.BifrostListModelsResponse{}
+	if liveResp != nil {
+		resp.Data = append(resp.Data, liveResp.Data...)
+		resp.ExtraFields = liveResp.ExtraFields
+		resp.KeyStatuses = append(resp.KeyStatuses, liveResp.KeyStatuses...)
+	}
+	mergeListModelsErrorContext(resp, liveErr)
+	return resp
+}
+
+func mergeListModelsErrorContext(resp *schemas.BifrostListModelsResponse, liveErr *schemas.BifrostError) {
+	if resp == nil || liveErr == nil {
+		return
+	}
+	resp.KeyStatuses = appendListModelsKeyStatuses(resp.KeyStatuses, liveErr.ExtraFields.KeyStatuses)
+	if resp.ExtraFields.RequestType == "" {
+		resp.ExtraFields.RequestType = liveErr.ExtraFields.RequestType
+	}
+	if resp.ExtraFields.Provider == "" {
+		resp.ExtraFields.Provider = liveErr.ExtraFields.Provider
+	}
+	if resp.ExtraFields.OriginalModelRequested == "" {
+		resp.ExtraFields.OriginalModelRequested = liveErr.ExtraFields.OriginalModelRequested
+	}
+	if resp.ExtraFields.ResolvedModelUsed == "" {
+		resp.ExtraFields.ResolvedModelUsed = liveErr.ExtraFields.ResolvedModelUsed
+	}
+	if resp.ExtraFields.Latency == 0 {
+		resp.ExtraFields.Latency = liveErr.ExtraFields.Latency
+	}
+	if resp.ExtraFields.RoutingInfo.Provider == "" && liveErr.ExtraFields.RoutingInfo.Provider != "" {
+		resp.ExtraFields.RoutingInfo = liveErr.ExtraFields.RoutingInfo
+	}
+}
+
+func appendListModelsKeyStatuses(dst, src []schemas.KeyStatus) []schemas.KeyStatus {
+	if len(src) == 0 {
+		return dst
+	}
+	if len(dst) == 0 {
+		return append([]schemas.KeyStatus(nil), src...)
+	}
+	seen := make(map[string]struct{}, len(dst))
+	for _, status := range dst {
+		seen[listModelsKeyStatusFingerprint(status)] = struct{}{}
+	}
+	for _, status := range src {
+		fingerprint := listModelsKeyStatusFingerprint(status)
+		if _, ok := seen[fingerprint]; ok {
+			continue
+		}
+		seen[fingerprint] = struct{}{}
+		dst = append(dst, status)
+	}
+	return dst
+}
+
+func listModelsKeyStatusFingerprint(status schemas.KeyStatus) string {
+	errMsg := ""
+	if status.Error != nil {
+		errMsg = status.Error.GetErrorString()
+	}
+	return string(status.Provider) + "|" + status.KeyID + "|" + string(status.Status) + "|" + errMsg
+}
+
+type listModelsRoutingScope struct {
+	Name string
+	ID   string
+}
+
+type listModelsResolvedRoutingTarget struct {
+	Provider schemas.ModelProvider
+	Model    string
+}
+
+func (h *CompletionHandler) collectListModelsRoutingScopes(bifrostCtx *schemas.BifrostContext, access schemas.Access) []listModelsRoutingScope {
+	scopes := make([]listModelsRoutingScope, 0, 5)
+	seen := make(map[string]struct{}, 5)
+	appendScope := func(name, id string) {
+		if name != "global" && id == "" {
+			return
+		}
+		key := name + "\x00" + id
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		scopes = append(scopes, listModelsRoutingScope{Name: name, ID: id})
+	}
+
+	if access != nil && bifrostCtx != nil {
+		appendScope("virtual_key", bifrost.GetStringFromContext(bifrostCtx, schemas.BifrostContextKeyGovernanceVirtualKeyID))
+		appendScope("user", bifrost.GetStringFromContext(bifrostCtx, schemas.BifrostContextKeyUserID))
+		appendScope("team", bifrost.GetStringFromContext(bifrostCtx, schemas.BifrostContextKeyGovernanceTeamID))
+		appendScope("customer", bifrost.GetStringFromContext(bifrostCtx, schemas.BifrostContextKeyGovernanceCustomerID))
+	}
+	appendScope("global", "")
+	return scopes
+}
+
+func extractListModelsRoutingRuleModels(expr string) []string {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil
+	}
+
+	p, err := parser.NewParser(parser.Macros(parser.AllMacros...))
+	if err != nil {
+		return nil
+	}
+	parsed, errs := p.Parse(common.NewTextSource(expr))
+	if errs != nil && len(errs.GetErrors()) > 0 {
+		return nil
+	}
+	if parsed == nil {
+		return nil
+	}
+
+	models, ok := listModelsRoutingRuleModelsFromExpr(parsed.Expr())
+	if !ok {
+		return nil
+	}
+	return dedupeListModelsRoutingRuleModels(models)
+}
+
+func listModelsRoutingRuleModelsFromExpr(expr celast.Expr) ([]string, bool) {
+	if expr == nil || expr.Kind() != celast.CallKind {
+		return nil, false
+	}
+
+	call := expr.AsCall()
+	switch call.FunctionName() {
+	case operators.LogicalOr:
+		args := call.Args()
+		if len(args) != 2 {
+			return nil, false
+		}
+		left, ok := listModelsRoutingRuleModelsFromExpr(args[0])
+		if !ok {
+			return nil, false
+		}
+		right, ok := listModelsRoutingRuleModelsFromExpr(args[1])
+		if !ok {
+			return nil, false
+		}
+		return append(left, right...), true
+	case operators.Equals:
+		return listModelsRoutingRuleModelsFromEquality(call.Args())
+	case operators.In:
+		return listModelsRoutingRuleModelsFromMembership(call.Args())
+	default:
+		return nil, false
+	}
+}
+
+func listModelsRoutingRuleModelsFromEquality(args []celast.Expr) ([]string, bool) {
+	if len(args) != 2 {
+		return nil, false
+	}
+	if model, ok := listModelsRoutingRuleModelFromComparison(args[0], args[1]); ok {
+		return []string{model}, true
+	}
+	if model, ok := listModelsRoutingRuleModelFromComparison(args[1], args[0]); ok {
+		return []string{model}, true
+	}
+	return nil, false
+}
+
+func listModelsRoutingRuleModelsFromMembership(args []celast.Expr) ([]string, bool) {
+	if len(args) != 2 || !isListModelsModelIdentifier(args[0]) {
+		return nil, false
+	}
+	return listModelsRoutingRuleStringList(args[1])
+}
+
+func listModelsRoutingRuleModelFromComparison(lhs, rhs celast.Expr) (string, bool) {
+	if !isListModelsModelIdentifier(lhs) {
+		return "", false
+	}
+	model, ok := listModelsRoutingRuleStringLiteral(rhs)
+	if !ok {
+		return "", false
+	}
+	provider, parsedModel := schemas.ParseModelString(model, "")
+	parsedModel = strings.TrimSpace(parsedModel)
+	if provider != "" || parsedModel == "" {
+		return "", false
+	}
+	return parsedModel, true
+}
+
+func isListModelsModelIdentifier(expr celast.Expr) bool {
+	return expr != nil && expr.Kind() == celast.IdentKind && expr.AsIdent() == "model"
+}
+
+func listModelsRoutingRuleStringLiteral(expr celast.Expr) (string, bool) {
+	if expr == nil || expr.Kind() != celast.LiteralKind {
+		return "", false
+	}
+	literal := expr.AsLiteral()
+	if literal == nil {
+		return "", false
+	}
+	value, ok := literal.Value().(string)
+	if !ok {
+		return "", false
+	}
+	return value, true
+}
+
+func listModelsRoutingRuleStringList(expr celast.Expr) ([]string, bool) {
+	if expr == nil || expr.Kind() != celast.ListKind {
+		return nil, false
+	}
+	items := expr.AsList().Elements()
+	models := make([]string, 0, len(items))
+	for _, item := range items {
+		model, ok := listModelsRoutingRuleStringLiteral(item)
+		if !ok {
+			return nil, false
+		}
+		provider, parsedModel := schemas.ParseModelString(model, "")
+		parsedModel = strings.TrimSpace(parsedModel)
+		if provider != "" || parsedModel == "" {
+			return nil, false
+		}
+		models = append(models, parsedModel)
+	}
+	return models, true
+}
+
+func dedupeListModelsRoutingRuleModels(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	filtered := models[:0]
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		if _, ok := seen[model]; ok {
+			continue
+		}
+		seen[model] = struct{}{}
+		filtered = append(filtered, model)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func listModelsRoutingTargetsForRule(rule configstoreTables.TableRoutingRule, incomingModel string, access schemas.Access) []listModelsResolvedRoutingTarget {
+	if incomingModel == "" || len(rule.Targets) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(rule.Targets))
+	targets := make([]listModelsResolvedRoutingTarget, 0, len(rule.Targets))
+	for _, target := range rule.Targets {
+		provider, modelName, ok := resolveListModelsRoutingTarget(target, incomingModel)
+		if !ok {
+			continue
+		}
+		if access != nil && !access.IsModelAllowed(string(provider), modelName) {
+			continue
+		}
+		key := string(provider) + "\x00" + modelName
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		targets = append(targets, listModelsResolvedRoutingTarget{Provider: provider, Model: modelName})
+	}
+	return targets
+}
+
+func resolveListModelsRoutingTarget(target configstoreTables.TableRoutingTarget, incomingModel string) (schemas.ModelProvider, string, bool) {
+	provider := schemas.ModelProvider("")
+	if target.Provider != nil {
+		provider = schemas.ModelProvider(strings.TrimSpace(*target.Provider))
+	}
+
+	modelName := strings.TrimSpace(incomingModel)
+	if target.Model != nil && strings.TrimSpace(*target.Model) != "" {
+		resolvedProvider, resolvedModel := schemas.ParseModelString(strings.TrimSpace(*target.Model), provider)
+		provider = resolvedProvider
+		modelName = strings.TrimSpace(resolvedModel)
+	}
+	if provider == "" || modelName == "" {
+		return "", "", false
+	}
+	return provider, modelName, true
+}
+
+func listModelsRoutingTargetAlias(targets []listModelsResolvedRoutingTarget) string {
+	if len(targets) != 1 {
+		return ""
+	}
+	return string(targets[0].Provider) + "/" + targets[0].Model
+}
+
+func (h *CompletionHandler) mergeRoutingListModelsResponse(bifrostCtx *schemas.BifrostContext, requestedProvider schemas.ModelProvider, resp *schemas.BifrostListModelsResponse) *schemas.BifrostListModelsResponse {
+	if resp == nil {
+		resp = &schemas.BifrostListModelsResponse{}
+	}
+	if requestedProvider != "" || h.config == nil || h.config.ConfigStore == nil {
+		return resp
+	}
+
+	var access schemas.Access
+	if bifrostCtx != nil && h.modelsManager != nil {
+		resolvedAccess, err := h.modelsManager.ResolveAccess(bifrostCtx)
+		if err != nil {
+			logger.Warn("Failed to resolve access for list-models routing synthesis: %v", err)
+			return resp
+		}
+		access = resolvedAccess
+	}
+
+	ctx := context.Background()
+	if bifrostCtx != nil {
+		ctx = bifrostCtx
+	}
+
+	decided := make(map[string]struct{}, len(resp.Data))
+	for _, modelEntry := range resp.Data {
+		decided[modelEntry.ID] = struct{}{}
+	}
+
+	for _, scope := range h.collectListModelsRoutingScopes(bifrostCtx, access) {
+		rules, err := h.config.ConfigStore.GetRoutingRulesByScope(ctx, scope.Name, scope.ID)
+		if err != nil {
+			if logger != nil {
+				logger.Warn("Failed to load routing rules for list-models scope=%s scope_id=%s: %v", scope.Name, scope.ID, err)
+			}
+			continue
+		}
+		for _, rule := range rules {
+			if rule.ChainRule {
+				continue
+			}
+			for _, routeModel := range extractListModelsRoutingRuleModels(rule.CelExpression) {
+				if _, ok := decided[routeModel]; ok {
+					continue
+				}
+				decided[routeModel] = struct{}{}
+				targets := listModelsRoutingTargetsForRule(rule, routeModel, access)
+				if len(targets) == 0 {
+					continue
+				}
+				modelEntry := schemas.Model{ID: routeModel}
+				if alias := listModelsRoutingTargetAlias(targets); alias != "" {
+					modelEntry.Alias = &alias
+				}
+				resp.Data = append(resp.Data, modelEntry)
+			}
+		}
+	}
+	return resp
 }
 
 // enrichListModelsResponse backfills pricing plus the subset of capability metadata
@@ -949,18 +1413,71 @@ func enrichListModelsResponse(resp *schemas.BifrostListModelsResponse, catalog *
 		modelEntry := &resp.Data[i]
 		provider, modelName := schemas.ParseModelString(modelEntry.ID, "")
 
-		pricingEntry := catalog.GetPricingEntryForModel(modelName, provider)
-		capabilityEntry := catalog.GetModelCapabilityEntryForModel(modelName, provider)
-		if pricingEntry == nil && modelEntry.Alias != nil {
-			pricingEntry = catalog.GetPricingEntryForModel(*modelEntry.Alias, provider)
-		}
-		if capabilityEntry == nil && modelEntry.Alias != nil {
-			capabilityEntry = catalog.GetModelCapabilityEntryForModel(*modelEntry.Alias, provider)
-		}
-
+		pricingEntry := resolveListModelsPricingEntry(catalog, provider, modelName, modelEntry.Alias)
+		capabilityEntry := resolveListModelsCapabilityEntry(catalog, provider, modelName, modelEntry.Alias)
 		applyCatalogPricingMetadata(modelEntry, pricingEntry)
 		applyCatalogCapabilityMetadata(modelEntry, capabilityEntry)
 	}
+}
+
+func resolveListModelsPricingEntry(catalog *modelcatalog.ModelCatalog, provider schemas.ModelProvider, modelName string, alias *string) *modelcatalog.PricingEntry {
+	if catalog == nil || modelName == "" {
+		return nil
+	}
+	if aliasOwner, ok := catalog.ResolveAlias(provider, modelName); ok {
+		if aliasOwner.Config.ModelName != nil && *aliasOwner.Config.ModelName != "" {
+			if pricingEntry := catalog.GetPricingEntryForModel(*aliasOwner.Config.ModelName, provider); pricingEntry != nil {
+				return pricingEntry
+			}
+		}
+		if aliasOwner.Config.ModelID != "" {
+			if pricingEntry := catalog.GetPricingEntryForModel(aliasOwner.Config.ModelID, provider); pricingEntry != nil {
+				return pricingEntry
+			}
+		}
+	}
+	if pricingEntry := catalog.GetPricingEntryForModel(modelName, provider); pricingEntry != nil {
+		return pricingEntry
+	}
+	if alias != nil && strings.TrimSpace(*alias) != "" {
+		aliasProvider, aliasModelName := schemas.ParseModelString(strings.TrimSpace(*alias), provider)
+		if aliasModelName != "" {
+			if pricingEntry := catalog.GetPricingEntryForModel(aliasModelName, aliasProvider); pricingEntry != nil {
+				return pricingEntry
+			}
+		}
+	}
+	return nil
+}
+
+func resolveListModelsCapabilityEntry(catalog *modelcatalog.ModelCatalog, provider schemas.ModelProvider, modelName string, alias *string) *modelcatalog.PricingEntry {
+	if catalog == nil || modelName == "" {
+		return nil
+	}
+	if aliasOwner, ok := catalog.ResolveAlias(provider, modelName); ok {
+		if aliasOwner.Config.ModelName != nil && *aliasOwner.Config.ModelName != "" {
+			if capabilityEntry := catalog.GetModelCapabilityEntryForModel(*aliasOwner.Config.ModelName, provider); capabilityEntry != nil {
+				return capabilityEntry
+			}
+		}
+		if aliasOwner.Config.ModelID != "" {
+			if capabilityEntry := catalog.GetModelCapabilityEntryForModel(aliasOwner.Config.ModelID, provider); capabilityEntry != nil {
+				return capabilityEntry
+			}
+		}
+	}
+	if capabilityEntry := catalog.GetModelCapabilityEntryForModel(modelName, provider); capabilityEntry != nil {
+		return capabilityEntry
+	}
+	if alias != nil && strings.TrimSpace(*alias) != "" {
+		aliasProvider, aliasModelName := schemas.ParseModelString(strings.TrimSpace(*alias), provider)
+		if aliasModelName != "" {
+			if capabilityEntry := catalog.GetModelCapabilityEntryForModel(aliasModelName, aliasProvider); capabilityEntry != nil {
+				return capabilityEntry
+			}
+		}
+	}
+	return nil
 }
 
 func applyCatalogPricingMetadata(modelEntry *schemas.Model, pricingEntry *modelcatalog.PricingEntry) {
